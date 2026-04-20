@@ -805,7 +805,12 @@ impl App {
             for key in keys {
                 let key_type: String = con.key_type(&key).await.unwrap_or("unknown".to_string());
                 let ttl: i64 = con.ttl(&key).await.unwrap_or(-1);
-                let memory = 0;
+                let memory: u64 = redis::cmd("MEMORY")
+                    .arg("USAGE")
+                    .arg(&key)
+                    .query_async(con)
+                    .await
+                    .unwrap_or(0);
 
                 key_infos.push(KeyInfo {
                     key,
@@ -886,7 +891,12 @@ impl App {
         for key in keys {
             let key_type: String = con.key_type(&key).await.unwrap_or("unknown".to_string());
             let ttl: i64 = con.ttl(&key).await.unwrap_or(-1);
-            let memory = 0;
+            let memory: u64 = redis::cmd("MEMORY")
+                .arg("USAGE")
+                .arg(&key)
+                .query_async(con)
+                .await
+                .unwrap_or(0);
 
             key_infos.push(KeyInfo {
                 key,
