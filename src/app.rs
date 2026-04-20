@@ -2,8 +2,8 @@ use crate::model::{
     ConnectionConfig, KeyInfo, KeyValue, ServerConfig, ServerInfo, ServerType, StreamEntry,
     TredisConfig,
 };
-use crate::ui::server_dialog::ServerDialogState;
 use crate::ui::splash::SplashState;
+use crate::ui::{edit_dialog::EditDialogState, server_dialog::ServerDialogState};
 use anyhow::Result;
 use redis::AsyncCommands;
 use std::collections::{HashMap, HashSet};
@@ -13,6 +13,7 @@ pub enum Mode {
     Splash,
     Normal,
     Describe,
+    EditValue,
     Confirm,
     Resources,
     ServerDialog,
@@ -143,6 +144,7 @@ pub struct App {
     // Describe Data
     pub describe_data: KeyValue,
     pub describe_scroll: usize,
+    pub edit_dialog_state: Option<EditDialogState>,
 
     // Confirm Action
     pub pending_action: Option<PendingAction>,
@@ -154,6 +156,25 @@ pub struct App {
 }
 
 impl App {
+    fn format_string_editor_buffer(value: &str) -> (String, bool) {
+        match serde_json::from_str::<serde_json::Value>(value) {
+            Ok(json) => (
+                serde_json::to_string_pretty(&json).unwrap_or_else(|_| value.to_string()),
+                true,
+            ),
+            Err(_) => (value.to_string(), false),
+        }
+    }
+
+    fn serialize_string_editor_buffer(buffer: &str, prefer_json: bool) -> Result<String> {
+        if prefer_json {
+            if let Ok(json) = serde_json::from_str::<serde_json::Value>(buffer) {
+                return Ok(serde_json::to_string(&json)?);
+            }
+        }
+        Ok(buffer.to_string())
+    }
+
     pub fn new() -> Self {
         let resources = vec![
             ResourceItem {
@@ -274,6 +295,7 @@ impl App {
             command_preview: None,
             describe_data: KeyValue::None,
             describe_scroll: 0,
+            edit_dialog_state: None,
             pending_action: None,
             last_key_press: None,
             client: None,
@@ -912,6 +934,130 @@ impl App {
                 _ => KeyValue::Error(format!("Unsupported type: {}", key_type)),
             };
         }
+        Ok(())
+    }
+
+    pub fn current_key_info(&self) -> Option<&KeyInfo> {
+        self.scan_result.get(self.selected_key_index)
+    }
+
+    pub fn start_editing_current_key(&mut self) -> Result<()> {
+        let key_info = self
+            .current_key_info()
+            .ok_or_else(|| anyhow::anyhow!("No key selected"))?;
+
+        let (buffer, prefer_json_for_string) = match &self.describe_data {
+            KeyValue::String(value) => Self::format_string_editor_buffer(value),
+            KeyValue::List(values) => (serde_json::to_string_pretty(values)?, false),
+            KeyValue::Set(values) => (serde_json::to_string_pretty(values)?, false),
+            KeyValue::ZSet(values) => (serde_json::to_string_pretty(values)?, false),
+            KeyValue::Hash(values) => (serde_json::to_string_pretty(values)?, false),
+            _ => {
+                return Err(anyhow::anyhow!(
+                    "Editing is only supported for string, list, set, hash, and zset keys"
+                ));
+            }
+        };
+
+        self.edit_dialog_state = Some(EditDialogState::new(
+            key_info.key.clone(),
+            buffer,
+            prefer_json_for_string,
+        ));
+        self.mode = Mode::EditValue;
+        Ok(())
+    }
+
+    pub async fn save_edited_value(&mut self) -> Result<()> {
+        let state = self
+            .edit_dialog_state
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("No edit state available"))?
+            .clone();
+        let key_info = self
+            .current_key_info()
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("No key selected"))?;
+
+        if state.key != key_info.key {
+            return Err(anyhow::anyhow!("Selected key changed while editing"));
+        }
+
+        let con = self
+            .connection
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("No Redis connection"))?;
+        let ttl: i64 = con.ttl(&state.key).await.unwrap_or(-1);
+
+        match key_info.key_type.as_str() {
+            "string" => {
+                let raw_value = Self::serialize_string_editor_buffer(
+                    &state.buffer,
+                    state.prefer_json_for_string,
+                )?;
+                let _: () = con.set(&state.key, raw_value).await?;
+            }
+            "list" => {
+                let values: Vec<String> = serde_json::from_str(&state.buffer)?;
+                let _: usize = con.del(&state.key).await?;
+                if !values.is_empty() {
+                    let _: usize = redis::cmd("RPUSH")
+                        .arg(&state.key)
+                        .arg(&values)
+                        .query_async(con)
+                        .await?;
+                }
+            }
+            "set" => {
+                let values: Vec<String> = serde_json::from_str(&state.buffer)?;
+                let _: usize = con.del(&state.key).await?;
+                if !values.is_empty() {
+                    let _: usize = redis::cmd("SADD")
+                        .arg(&state.key)
+                        .arg(&values)
+                        .query_async(con)
+                        .await?;
+                }
+            }
+            "hash" => {
+                let values: HashMap<String, String> = serde_json::from_str(&state.buffer)?;
+                let _: usize = con.del(&state.key).await?;
+                if !values.is_empty() {
+                    let mut cmd = redis::cmd("HSET");
+                    cmd.arg(&state.key);
+                    for (field, value) in &values {
+                        cmd.arg(field).arg(value);
+                    }
+                    let _: usize = cmd.query_async(con).await?;
+                }
+            }
+            "zset" => {
+                let values: Vec<(String, f64)> = serde_json::from_str(&state.buffer)?;
+                let _: usize = con.del(&state.key).await?;
+                if !values.is_empty() {
+                    let mut cmd = redis::cmd("ZADD");
+                    cmd.arg(&state.key);
+                    for (member, score) in &values {
+                        cmd.arg(score).arg(member);
+                    }
+                    let _: usize = cmd.query_async(con).await?;
+                }
+            }
+            other => {
+                return Err(anyhow::anyhow!(
+                    "Editing is not supported for '{}' keys",
+                    other
+                ));
+            }
+        }
+
+        if ttl > 0 {
+            let _: bool = con.expire(&state.key, ttl).await?;
+        }
+
+        self.fetch_key_value().await?;
+        self.edit_dialog_state = None;
+        self.mode = Mode::Describe;
         Ok(())
     }
 

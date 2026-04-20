@@ -4,6 +4,7 @@ pub mod clients_table;
 pub mod configs_table;
 pub mod describe;
 pub mod dialog;
+pub mod edit_dialog;
 pub mod header;
 pub mod info_view;
 pub mod keys_table;
@@ -46,7 +47,7 @@ pub fn render(f: &mut Frame, app: &App) {
     header::render(f, app, chunks[0]);
 
     match app.mode {
-        Mode::Describe => {
+        Mode::Describe | Mode::EditValue => {
             describe::render(f, app, chunks[1]);
         }
         _ => match app.active_resource.as_str() {
@@ -71,5 +72,9 @@ pub fn render(f: &mut Frame, app: &App) {
 
     if app.mode == Mode::Resources {
         resources::render(f, app);
+    }
+
+    if app.mode == Mode::EditValue {
+        edit_dialog::render(f, app);
     }
 }

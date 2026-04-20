@@ -288,11 +288,11 @@ tredis supports viewing all Redis data types:
 
 | Type | View Support |
 |------|--------------|
-| **String** | Full value display |
-| **List** | All elements with index |
-| **Set** | All members |
-| **Hash** | All field-value pairs |
-| **Sorted Set** | Members with scores |
+| **String** | Full value display and edit |
+| **List** | All elements with index and JSON edit |
+| **Set** | All members and JSON edit |
+| **Hash** | All field-value pairs and JSON edit |
+| **Sorted Set** | Members with scores and JSON edit |
 | **Stream** | Messages with IDs and fields |
 
 ---
