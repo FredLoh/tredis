@@ -100,7 +100,7 @@ pub fn render(f: &mut Frame, app: &App, area: Rect) {
                 get_type_style(&item.key_type)
             }),
             Cell::from(item.ttl.to_string()),
-            Cell::from(item.memory_usage.to_string()),
+            Cell::from(format_bytes(item.memory_usage)),
         ];
         Row::new(cells).style(row_style)
     });
@@ -123,6 +123,21 @@ pub fn render(f: &mut Frame, app: &App, area: Rect) {
     state.select(Some(app.selected_key_index));
 
     f.render_stateful_widget(table, inner_area, &mut state);
+}
+
+fn format_bytes(bytes: u64) -> String {
+    const UNITS: &[&str] = &["B", "KB", "MB", "GB", "TB", "PB"];
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{} {}", bytes, UNITS[unit])
+    } else {
+        format!("{:.2} {}", value, UNITS[unit])
+    }
 }
 
 fn get_type_style(key_type: &str) -> Style {
