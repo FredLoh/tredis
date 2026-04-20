@@ -1193,6 +1193,13 @@ async fn main() -> Result<()> {
                             KeyCode::Esc | KeyCode::Char('q') => {
                                 app.mode = Mode::Normal;
                             }
+                            KeyCode::Char('e') | KeyCode::Enter => {
+                                if app.active_resource == "keys" {
+                                    if let Err(e) = app.start_editing_current_key() {
+                                        eprintln!("Error starting editor: {}", e);
+                                    }
+                                }
+                            }
                             KeyCode::Char('j') | KeyCode::Down => {
                                 app.describe_scroll = app.describe_scroll.saturating_add(1);
                             }
@@ -1221,6 +1228,37 @@ async fn main() -> Result<()> {
                         }
                         if !handled_g {
                             app.last_key_press = None;
+                        }
+                    }
+                    Mode::EditValue => {
+                        if let Some(state) = &mut app.edit_dialog_state {
+                            match key.code {
+                                KeyCode::Esc => {
+                                    app.edit_dialog_state = None;
+                                    app.mode = Mode::Describe;
+                                }
+                                KeyCode::Enter => {
+                                    if let Err(e) = app.save_edited_value().await {
+                                        if let Some(state) = &mut app.edit_dialog_state {
+                                            state.set_error(format!("Error: {}", e));
+                                        }
+                                    }
+                                }
+                                KeyCode::Backspace => state.backspace(),
+                                KeyCode::Delete => state.delete(),
+                                KeyCode::Left => state.move_left(),
+                                KeyCode::Right => state.move_right(),
+                                KeyCode::Home => state.move_home(),
+                                KeyCode::End => state.move_end(),
+                                KeyCode::Tab => state.insert_str("  "),
+                                KeyCode::Char('j')
+                                    if key.modifiers.contains(KeyModifiers::CONTROL) =>
+                                {
+                                    state.insert_char('\n');
+                                }
+                                KeyCode::Char(c) => state.insert_char(c),
+                                _ => {}
+                            }
                         }
                     }
                     Mode::Resources => {

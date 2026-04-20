@@ -105,7 +105,16 @@ fn render_stats_column(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn render_keybindings_col1(f: &mut Frame, app: &App, area: Rect) {
-    let bindings = match app.active_resource.as_str() {
+    let resource = if matches!(
+        app.mode,
+        crate::app::Mode::Describe | crate::app::Mode::EditValue
+    ) {
+        "describe"
+    } else {
+        app.active_resource.as_str()
+    };
+
+    let bindings = match resource {
         "servers" => vec![
             ("<c>", "Connect"),
             ("<d>", "Describe"),
@@ -114,9 +123,15 @@ fn render_keybindings_col1(f: &mut Frame, app: &App, area: Rect) {
         ],
         "keys" => vec![
             ("<d>", "Describe"),
+            ("<e>", "Edit Value"),
             ("<]>", "Next Page"),
             ("<[>", "Prev Page"),
-            ("</>", "Filter"),
+        ],
+        "describe" => vec![
+            ("<e>", "Edit"),
+            ("<Enter>", "Save"),
+            ("<Esc>", "Back"),
+            ("<j/k>", "Scroll"),
         ],
         "streams" => vec![
             ("<d>", "Describe"),
