@@ -3,7 +3,7 @@ mod model;
 mod ui;
 
 use anyhow::Result;
-use app::{App, Mode, PendingAction, PendingActionType};
+use app::{App, KeyFetchResult, Mode, PendingAction, PendingActionType};
 use clap::Parser;
 use crossterm::{
     event::{Event, KeyCode, KeyModifiers},
@@ -257,6 +257,10 @@ async fn main() -> Result<()> {
                 // Mode specific key handling
                 match app.mode {
                     Mode::Normal => {
+                        if app.loading_state.active {
+                            continue;
+                        }
+
                         if app.info_search_active {
                             // Info search mode - typing search query
                             match key.code {
@@ -281,10 +285,36 @@ async fn main() -> Result<()> {
                                     // Search on Enter - Reset pagination
                                     app.pagination.cursor = 0;
                                     app.pagination.cursor_stack.clear();
-                                    if let Err(e) =
-                                        app.fetch_keys(Some(app.filter_text.clone())).await
-                                    {
-                                        eprintln!("Search error: {}", e);
+                                    app.pagination.current_page = 1;
+                                    app.start_loading(format!(
+                                        "Searching keys for '{}'",
+                                        app.filter_text
+                                    ));
+
+                                    if let Some(uri) = app.current_server_uri() {
+                                        let tx_clone = tx.clone();
+                                        let pattern = app.filter_text.clone();
+                                        let page_size = app.pagination.page_size;
+
+                                        tokio::spawn(async move {
+                                            let result = App::fetch_keys_for_uri(
+                                                &uri,
+                                                0,
+                                                page_size,
+                                                Some(pattern),
+                                            )
+                                            .await;
+                                            let event = match result {
+                                                Ok(result) => AppEvent::KeysLoaded(result),
+                                                Err(err) => AppEvent::KeyLoadFailed(format!(
+                                                    "Search error: {}",
+                                                    err
+                                                )),
+                                            };
+                                            let _ = tx_clone.send(event).await;
+                                        });
+                                    } else {
+                                        app.stop_loading();
                                     }
                                 }
                                 KeyCode::Esc => {
@@ -293,6 +323,7 @@ async fn main() -> Result<()> {
                                     // Reset to default view - Reset pagination
                                     app.pagination.cursor = 0;
                                     app.pagination.cursor_stack.clear();
+                                    app.pagination.current_page = 1;
                                     if let Err(e) = app.fetch_keys(None).await {
                                         eprintln!("Error fetching keys: {}", e);
                                     }
@@ -1605,6 +1636,14 @@ async fn main() -> Result<()> {
                         }
                     }
                 }
+                AppEvent::KeysLoaded(result) => {
+                    app.stop_loading();
+                    app.apply_key_fetch_result(result);
+                }
+                AppEvent::KeyLoadFailed(err) => {
+                    app.stop_loading();
+                    eprintln!("{}", err);
+                }
                 AppEvent::MonitorCommand(entry) => {
                     if app.monitor_active {
                         // Prepend to beginning of list (newest first)
@@ -1712,6 +1751,8 @@ async fn main() -> Result<()> {
 enum AppEvent {
     Progress(String),
     Connect,
+    KeysLoaded(KeyFetchResult),
+    KeyLoadFailed(String),
     ServerInfoDetected {
         server_name: String,
         info: ServerInfo,

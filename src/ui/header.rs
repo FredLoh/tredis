@@ -78,12 +78,12 @@ fn render_stats_column(f: &mut Frame, app: &App, area: Rect) {
     lines.push(Line::from(vec![
         Span::styled("Page:    ", Style::default().fg(Color::DarkGray)),
         Span::styled(
-            format!("{}", app.pagination.cursor_stack.len() + 1),
+            format!("{}/{}", app.current_page(), app.total_pages()),
             Style::default()
                 .fg(Color::White)
                 .add_modifier(Modifier::BOLD),
         ),
-        if app.pagination.next_cursor != 0 {
+        if app.has_next_page() {
             Span::styled("+", Style::default().fg(Color::Yellow))
         } else {
             Span::raw("")
