@@ -40,17 +40,19 @@ pub fn render(f: &mut Frame, app: &App, area: Rect) {
 
     let title = if app.selected_keys.is_empty() {
         format!(
-            " Keys ({}/{}) [Page: {}] ",
+            " Keys ({}/{}) [Page: {}/{}] ",
             app.scan_result.len(),
             app.pagination.total_keys,
-            app.pagination.cursor_stack.len() + 1
+            app.current_page(),
+            app.total_pages()
         )
     } else {
         format!(
-            " Keys ({}/{}) [Page: {}] - {} selected ",
+            " Keys ({}/{}) [Page: {}/{}] - {} selected ",
             app.scan_result.len(),
             app.pagination.total_keys,
-            app.pagination.cursor_stack.len() + 1,
+            app.current_page(),
+            app.total_pages(),
             app.selected_keys.len()
         )
     };

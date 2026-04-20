@@ -41,6 +41,29 @@ pub struct PendingAction {
     pub matched_keys: Vec<String>,
 }
 
+pub struct LoadingState {
+    pub active: bool,
+    pub message: String,
+    pub spinner_frame: usize,
+}
+
+impl Default for LoadingState {
+    fn default() -> Self {
+        Self {
+            active: false,
+            message: String::new(),
+            spinner_frame: 0,
+        }
+    }
+}
+
+pub struct KeyFetchResult {
+    pub key_infos: Vec<KeyInfo>,
+    pub total_keys: u64,
+    pub next_cursor: u64,
+    pub filtered_mode: bool,
+}
+
 #[derive(Debug, Clone)]
 pub struct PaginationState {
     pub cursor: u64,
@@ -48,6 +71,9 @@ pub struct PaginationState {
     pub cursor_stack: Vec<u64>,
     pub total_keys: u64,
     pub page_size: usize,
+    pub filtered_mode: bool,
+    pub current_page: usize,
+    pub total_pages: usize,
 }
 
 impl Default for PaginationState {
@@ -58,6 +84,9 @@ impl Default for PaginationState {
             cursor_stack: Vec::new(),
             total_keys: 0,
             page_size: 100,
+            filtered_mode: false,
+            current_page: 1,
+            total_pages: 1,
         }
     }
 }
@@ -149,6 +178,7 @@ pub struct App {
     // Confirm Action
     pub pending_action: Option<PendingAction>,
     pub last_key_press: Option<(crossterm::event::KeyCode, std::time::Instant)>,
+    pub loading_state: LoadingState,
 
     // Redis
     pub client: Option<redis::Client>,
@@ -298,6 +328,7 @@ impl App {
             edit_dialog_state: None,
             pending_action: None,
             last_key_press: None,
+            loading_state: LoadingState::default(),
             client: None,
             connection: None,
         }
@@ -724,20 +755,51 @@ impl App {
 
     pub async fn fetch_keys(&mut self, pattern: Option<String>) -> Result<()> {
         if let Some(con) = &mut self.connection {
-            let total: u64 = redis::cmd("DBSIZE").query_async(con).await.unwrap_or(0);
-            self.pagination.total_keys = total;
+            let keys = if let Some(p) = &pattern {
+                self.pagination.filtered_mode = true;
+                self.pagination.cursor = 0;
+                self.pagination.next_cursor = 0;
+                self.pagination.cursor_stack.clear();
 
-            let mut cmd = redis::cmd("SCAN");
-            cmd.arg(self.pagination.cursor);
+                let mut matched_keys = Vec::new();
+                let mut cursor = 0;
+                let scan_count = self.pagination.page_size.max(1000);
 
-            if let Some(p) = &pattern {
-                cmd.arg("MATCH").arg(format!("*{}*", p));
-            }
+                loop {
+                    let mut cmd = redis::cmd("SCAN");
+                    cmd.arg(cursor)
+                        .arg("MATCH")
+                        .arg(format!("*{}*", p))
+                        .arg("COUNT")
+                        .arg(scan_count);
 
-            cmd.arg("COUNT").arg(self.pagination.page_size);
+                    let (next_cursor, batch): (u64, Vec<String>) = cmd.query_async(con).await?;
+                    matched_keys.extend(batch);
+                    cursor = next_cursor;
 
-            let (next_cursor, keys): (u64, Vec<String>) = cmd.query_async(con).await?;
-            self.pagination.next_cursor = next_cursor;
+                    if cursor == 0 {
+                        break;
+                    }
+                }
+
+                matched_keys
+            } else {
+                let total: u64 = redis::cmd("DBSIZE").query_async(con).await.unwrap_or(0);
+                self.pagination.total_keys = total;
+                self.pagination.filtered_mode = false;
+                self.pagination.current_page = self.pagination.cursor_stack.len() + 1;
+                self.pagination.total_pages =
+                    Self::page_count(total as usize, self.pagination.page_size);
+
+                let mut cmd = redis::cmd("SCAN");
+                cmd.arg(self.pagination.cursor)
+                    .arg("COUNT")
+                    .arg(self.pagination.page_size);
+
+                let (next_cursor, keys): (u64, Vec<String>) = cmd.query_async(con).await?;
+                self.pagination.next_cursor = next_cursor;
+                keys
+            };
 
             let mut key_infos = Vec::new();
             for key in keys {
@@ -759,7 +821,125 @@ impl App {
         Ok(())
     }
 
+    pub async fn fetch_keys_for_uri(
+        uri: &str,
+        cursor: u64,
+        page_size: usize,
+        pattern: Option<String>,
+    ) -> Result<KeyFetchResult> {
+        let client = redis::Client::open(uri)?;
+        let mut con = client.get_multiplexed_async_connection().await?;
+
+        let keys = if let Some(p) = &pattern {
+            let mut matched_keys = Vec::new();
+            let mut scan_cursor = 0;
+            let scan_count = page_size.max(1000);
+
+            loop {
+                let mut cmd = redis::cmd("SCAN");
+                cmd.arg(scan_cursor)
+                    .arg("MATCH")
+                    .arg(format!("*{}*", p))
+                    .arg("COUNT")
+                    .arg(scan_count);
+
+                let (next_cursor, batch): (u64, Vec<String>) = cmd.query_async(&mut con).await?;
+                matched_keys.extend(batch);
+                scan_cursor = next_cursor;
+
+                if scan_cursor == 0 {
+                    break;
+                }
+            }
+
+            KeyFetchResult {
+                total_keys: matched_keys.len() as u64,
+                key_infos: Self::load_key_infos(&mut con, matched_keys).await,
+                next_cursor: 0,
+                filtered_mode: true,
+            }
+        } else {
+            let total: u64 = redis::cmd("DBSIZE")
+                .query_async(&mut con)
+                .await
+                .unwrap_or(0);
+            let mut cmd = redis::cmd("SCAN");
+            cmd.arg(cursor).arg("COUNT").arg(page_size);
+            let (next_cursor, keys): (u64, Vec<String>) = cmd.query_async(&mut con).await?;
+
+            KeyFetchResult {
+                total_keys: total,
+                key_infos: Self::load_key_infos(&mut con, keys).await,
+                next_cursor,
+                filtered_mode: false,
+            }
+        };
+
+        Ok(keys)
+    }
+
+    async fn load_key_infos(
+        con: &mut redis::aio::MultiplexedConnection,
+        keys: Vec<String>,
+    ) -> Vec<KeyInfo> {
+        let mut key_infos = Vec::new();
+        for key in keys {
+            let key_type: String = con.key_type(&key).await.unwrap_or("unknown".to_string());
+            let ttl: i64 = con.ttl(&key).await.unwrap_or(-1);
+            let memory = 0;
+
+            key_infos.push(KeyInfo {
+                key,
+                key_type,
+                ttl,
+                memory_usage: memory,
+            });
+        }
+        key_infos
+    }
+
+    pub fn apply_key_fetch_result(&mut self, result: KeyFetchResult) {
+        self.pagination.total_keys = result.total_keys;
+        self.pagination.next_cursor = result.next_cursor;
+        self.pagination.filtered_mode = result.filtered_mode;
+        if !result.filtered_mode {
+            self.pagination.current_page = self.pagination.cursor_stack.len() + 1;
+            self.pagination.total_pages =
+                Self::page_count(result.total_keys as usize, self.pagination.page_size);
+        }
+
+        self.all_keys = result.key_infos;
+        self.apply_filter();
+    }
+
+    pub fn current_server_uri(&self) -> Option<String> {
+        self.current_server
+            .as_ref()
+            .map(|server| server.uri.clone())
+    }
+
+    pub fn start_loading(&mut self, message: impl Into<String>) {
+        self.loading_state.active = true;
+        self.loading_state.message = message.into();
+        self.loading_state.spinner_frame = 0;
+    }
+
+    pub fn stop_loading(&mut self) {
+        self.loading_state.active = false;
+        self.loading_state.message.clear();
+        self.loading_state.spinner_frame = 0;
+    }
+
     pub async fn next_page(&mut self) -> Result<()> {
+        if self.pagination.filtered_mode {
+            if self.pagination.current_page < self.pagination.total_pages {
+                self.pagination.current_page += 1;
+                self.selected_keys.clear();
+                self.apply_filter();
+            }
+            return Ok(());
+        }
+
         if self.pagination.next_cursor != 0 {
             self.pagination.cursor_stack.push(self.pagination.cursor);
             self.pagination.cursor = self.pagination.next_cursor;
@@ -776,6 +956,15 @@ impl App {
     }
 
     pub async fn prev_page(&mut self) -> Result<()> {
+        if self.pagination.filtered_mode {
+            if self.pagination.current_page > 1 {
+                self.pagination.current_page -= 1;
+                self.selected_keys.clear();
+                self.apply_filter();
+            }
+            return Ok(());
+        }
+
         if let Some(prev_cursor) = self.pagination.cursor_stack.pop() {
             self.pagination.cursor = prev_cursor;
             self.selected_keys.clear(); // Clear selection when changing pages
@@ -791,16 +980,45 @@ impl App {
     }
 
     pub fn apply_filter(&mut self) {
-        if self.filter_text.is_empty() {
-            self.scan_result = self.all_keys.clone();
-        } else {
-            let filter = self.filter_text.to_lowercase();
-            self.scan_result = self
-                .all_keys
-                .iter()
-                .filter(|k| k.key.to_lowercase().contains(&filter))
-                .cloned()
+        if self.pagination.filtered_mode {
+            let filtered_keys: Vec<KeyInfo> = if self.filter_text.is_empty() {
+                self.all_keys.clone()
+            } else {
+                let filter = self.filter_text.to_lowercase();
+                self.all_keys
+                    .iter()
+                    .filter(|k| k.key.to_lowercase().contains(&filter))
+                    .cloned()
+                    .collect()
+            };
+
+            self.pagination.total_keys = filtered_keys.len() as u64;
+            self.pagination.total_pages =
+                Self::page_count(filtered_keys.len(), self.pagination.page_size);
+
+            if self.pagination.current_page > self.pagination.total_pages {
+                self.pagination.current_page = self.pagination.total_pages;
+            }
+
+            let start =
+                (self.pagination.current_page.saturating_sub(1)) * self.pagination.page_size;
+            self.scan_result = filtered_keys
+                .into_iter()
+                .skip(start)
+                .take(self.pagination.page_size)
                 .collect();
+        } else {
+            if self.filter_text.is_empty() {
+                self.scan_result = self.all_keys.clone();
+            } else {
+                let filter = self.filter_text.to_lowercase();
+                self.scan_result = self
+                    .all_keys
+                    .iter()
+                    .filter(|k| k.key.to_lowercase().contains(&filter))
+                    .cloned()
+                    .collect();
+            }
         }
 
         // Clear selection when filter changes - only keep selections that are still visible
@@ -813,6 +1031,39 @@ impl App {
             } else {
                 self.selected_key_index = 0;
             }
+        }
+    }
+
+    fn page_count(total_items: usize, page_size: usize) -> usize {
+        let page_size = page_size.max(1);
+        let pages = total_items.div_ceil(page_size);
+        pages.max(1)
+    }
+
+    pub fn current_page(&self) -> usize {
+        if self.pagination.filtered_mode {
+            self.pagination.current_page
+        } else {
+            self.pagination.cursor_stack.len() + 1
+        }
+    }
+
+    pub fn total_pages(&self) -> usize {
+        if self.pagination.filtered_mode {
+            self.pagination.total_pages
+        } else {
+            Self::page_count(
+                self.pagination.total_keys as usize,
+                self.pagination.page_size,
+            )
+        }
+    }
+
+    pub fn has_next_page(&self) -> bool {
+        if self.pagination.filtered_mode {
+            self.pagination.current_page < self.pagination.total_pages
+        } else {
+            self.pagination.next_cursor != 0
         }
     }
 
@@ -1124,6 +1375,9 @@ impl App {
     pub fn on_tick(&mut self) {
         if self.mode == Mode::Splash {
             self.splash_state.spinner_frame = (self.splash_state.spinner_frame + 1) % 4;
+        }
+        if self.loading_state.active {
+            self.loading_state.spinner_frame = (self.loading_state.spinner_frame + 1) % 4;
         }
     }
 

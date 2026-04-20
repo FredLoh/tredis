@@ -19,7 +19,10 @@ pub mod streams_table;
 
 use crate::app::{App, Mode};
 use ratatui::{
-    layout::{Constraint, Direction, Layout},
+    layout::{Alignment, Constraint, Direction, Layout, Rect},
+    style::{Color, Modifier, Style},
+    text::{Line, Span},
+    widgets::{Block, Borders, Clear, Paragraph},
     Frame,
 };
 
@@ -77,4 +80,57 @@ pub fn render(f: &mut Frame, app: &App) {
     if app.mode == Mode::EditValue {
         edit_dialog::render(f, app);
     }
+
+    if app.loading_state.active {
+        render_loading_overlay(f, app);
+    }
+}
+
+fn render_loading_overlay(f: &mut Frame, app: &App) {
+    let area = centered_rect(50, 5, f.area());
+    let spinner_chars = ["⠋", "⠙", "⠹", "⠸"];
+    let spinner = spinner_chars[app.loading_state.spinner_frame % spinner_chars.len()];
+
+    let block = Block::default()
+        .title(" Loading ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Yellow));
+
+    let content = Paragraph::new(Line::from(vec![
+        Span::styled(
+            format!("{} ", spinner),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            &app.loading_state.message,
+            Style::default().fg(Color::White),
+        ),
+    ]))
+    .alignment(Alignment::Center)
+    .block(block);
+
+    f.render_widget(Clear, area);
+    f.render_widget(content, area);
+}
+
+fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
+    let vertical = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage((100 - height) / 2),
+            Constraint::Percentage(height),
+            Constraint::Percentage((100 - height) / 2),
+        ])
+        .split(area);
+
+    Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage((100 - width) / 2),
+            Constraint::Percentage(width),
+            Constraint::Percentage((100 - width) / 2),
+        ])
+        .split(vertical[1])[1]
 }
